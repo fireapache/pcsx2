@@ -23,6 +23,7 @@
 #include "IopMem.h"
 #include "Host.h"
 #include "VMManager.h"
+#include "DebugTools/GdbServer.h"
 
 #include "common/BitUtils.h"
 #include "common/Error.h"
@@ -535,10 +536,13 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 	}
 
 	const std::string message(fmt::format("TLB Miss, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
-	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
+	// An attached gdb hears this as SIGSEGV: pause for it, without the dialog.
+	const bool gdb_stop = GdbServer::OnMemoryFault(cpuRegs.pc, addr, mode != 0);
+	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss || gdb_stop)
 	{
 		// Pause, let the user try to figure out what went wrong in the debugger.
-		Host::ReportErrorAsync("R5900 Exception", message);
+		if (!gdb_stop)
+			Host::ReportErrorAsync("R5900 Exception", message);
 		VMManager::SetPaused(true);
 		Cpu->ExitExecution();
 		return;
@@ -555,10 +559,13 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 static __ri void vtlb_BusError(u32 addr, u32 mode)
 {
 	const std::string message(fmt::format("Bus Error, addr=0x{:x} [{}]", addr, mode ? "store" : "load"));
-	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
+	// An attached gdb hears this as SIGSEGV: pause for it, without the dialog.
+	const bool gdb_stop = GdbServer::OnMemoryFault(cpuRegs.pc, addr, mode != 0);
+	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss || gdb_stop)
 	{
 		// Pause, let the user try to figure out what went wrong in the debugger.
-		Host::ReportErrorAsync("R5900 Exception", message);
+		if (!gdb_stop)
+			Host::ReportErrorAsync("R5900 Exception", message);
 		VMManager::SetPaused(true);
 		Cpu->ExitExecution();
 		return;

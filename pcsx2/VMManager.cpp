@@ -8,6 +8,7 @@
 #include "Counters.h"
 #include "DEV9/DEV9.h"
 #include "DebugTools/DebugInterface.h"
+#include "DebugTools/GdbServer.h"
 #include "DebugTools/SymbolImporter.h"
 #include "Elfheader.h"
 #include "FW.h"
@@ -427,6 +428,7 @@ bool VMManager::Internal::CPUThreadInitialize()
 		Achievements::Initialize();
 
 	ReloadPINE();
+	GdbServer::Reload();
 
 	if (EmuConfig.EnableDiscordPresence)
 		InitializeDiscordPresence();
@@ -443,6 +445,7 @@ void VMManager::Internal::CPUThreadShutdown()
 	ShutdownDiscordPresence();
 
 	PINEServer::Deinitialize();
+	GdbServer::Shutdown();
 
 	Achievements::Shutdown(false);
 
@@ -1179,6 +1182,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 	{
 		Achievements::GameChanged(s_disc_crc, s_current_crc);
 		ReloadPINE();
+		GdbServer::Reload();
 		UpdateDiscordPresence(s_state.load(std::memory_order_relaxed) == VMState::Initializing);
 		FileMcd_Reopen(memcardFilters.empty() ? s_disc_serial : memcardFilters);
 	}
