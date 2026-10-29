@@ -173,7 +173,7 @@ namespace
 				stop.data_address = LastAddressOf(seen->memchecks, range);
 				return stop;
 			}
-			if (seen->triggered || seen->pc == step_target || m_breakpoints.count(seen->pc) != 0)
+			if (seen->triggered || seen->pc == step_target || m_installed.count(seen->pc) != 0)
 				stop.reason = GdbRsp::StopReason::Breakpoint;
 			// Otherwise: paused by gdb's interrupt or from the UI -> Interrupt.
 			return stop;
@@ -242,21 +242,14 @@ namespace
 
 		bool SetBreakpoint(u32 address, bool set) override
 		{
-			const bool ok = RunOnCPU([address, set] {
-				if (set)
-					CBreakPoints::AddBreakPoint(BREAKPOINT_EE, address);
-				else
-					CBreakPoints::RemoveBreakPoint(BREAKPOINT_EE, address);
-				return true;
-			});
-			if (ok)
-			{
-				if (set)
-					m_breakpoints.insert(address);
-				else
-					m_breakpoints.erase(address);
-			}
-			return ok;
+			// Only noted here, applied by Run(): gdb takes every breakpoint out
+			// at a stop and puts it back before the next resume, and each
+			// CBreakPoints change recompiles the whole EE.
+			if (set)
+				m_breakpoints.insert(address);
+			else
+				m_breakpoints.erase(address);
+			return true;
 		}
 
 		bool SetWatchpoint(u32 address, u32 size, GdbRsp::WatchKind kind, bool set) override
@@ -282,11 +275,12 @@ namespace
 
 		void ClearAll() override
 		{
-			std::vector<u32> breakpoints(m_breakpoints.begin(), m_breakpoints.end());
+			std::vector<u32> breakpoints(m_installed.begin(), m_installed.end());
 			std::vector<std::pair<u32, u32>> watches;
 			for (const auto& [range, watch] : m_watches)
 				watches.push_back(range);
 			m_breakpoints.clear();
+			m_installed.clear();
 			m_watches.clear();
 			RunOnCPU([breakpoints = std::move(breakpoints), watches = std::move(watches)] {
 				for (u32 address : breakpoints)
@@ -314,7 +308,32 @@ namespace
 				for (auto& [range, watch] : m_watches)
 					watch.hits_at_resume = HitsOf(*hits, range);
 			}
-			const auto target = CallOnCPU<u32>([step] {
+
+			// Only what changed since the last resume reaches CBreakPoints. A
+			// step may leave a breakpoint on its own pc in: the skip-first below
+			// passes over it, and gdb puts it back after the step anyway.
+			const u32 resume_pc = r5900Debug.getPC();
+			std::vector<u32> add, remove;
+			for (u32 address : m_breakpoints)
+			{
+				if (m_installed.count(address) == 0)
+					add.push_back(address);
+			}
+			for (u32 address : m_installed)
+			{
+				if (m_breakpoints.count(address) == 0 && !(step && address == resume_pc))
+					remove.push_back(address);
+			}
+			for (u32 address : add)
+				m_installed.insert(address);
+			for (u32 address : remove)
+				m_installed.erase(address);
+
+			const auto target = CallOnCPU<u32>([step, add = std::move(add), remove = std::move(remove)] {
+				for (u32 address : remove)
+					CBreakPoints::RemoveBreakPoint(BREAKPOINT_EE, address);
+				for (u32 address : add)
+					CBreakPoints::AddBreakPoint(BREAKPOINT_EE, address);
 				const u32 pc = r5900Debug.getPC();
 				// A breakpoint on the resume pc would stop again at once.
 				CBreakPoints::SetSkipFirst(BREAKPOINT_EE, pc);
@@ -361,7 +380,8 @@ namespace
 			return range.first;
 		}
 
-		std::set<u32> m_breakpoints;
+		std::set<u32> m_breakpoints; // what gdb has inserted
+		std::set<u32> m_installed; // what CBreakPoints holds for gdb (see Run)
 		std::map<std::pair<u32, u32>, Watch> m_watches;
 		std::optional<u32> m_step_target; // where the last step planted its breakpoint
 	};
