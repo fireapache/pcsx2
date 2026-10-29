@@ -536,7 +536,8 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 	}
 
 	const std::string message(fmt::format("TLB Miss, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
-	// An attached gdb hears this as SIGSEGV: pause for it, without the dialog.
+	// An attached GDB client hears this as SIGSEGV: pause for it, without the dialog.
+	// Needs proper testing: under the recompiler cpuRegs.pc can still be the block start.
 	const bool gdb_stop = GdbServer::OnMemoryFault(cpuRegs.pc, addr, mode != 0);
 	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss || gdb_stop)
 	{

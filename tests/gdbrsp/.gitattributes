@@ -1,2 +1,0 @@
-# Run from WSL / Linux / macOS bash: a CRLF checkout would break them.
-*.sh text eol=lf

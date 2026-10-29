@@ -69,10 +69,13 @@ namespace
 	{
 		switch (kind)
 		{
-			case GdbRsp::WatchKind::Read: return MEMCHECK_READ;
-			case GdbRsp::WatchKind::Access: return MEMCHECK_READWRITE;
+			case GdbRsp::WatchKind::Read:
+				return MEMCHECK_READ;
+			case GdbRsp::WatchKind::Access:
+				return MEMCHECK_READWRITE;
 			case GdbRsp::WatchKind::Write:
-			default: return MEMCHECK_WRITE;
+			default:
+				return MEMCHECK_WRITE;
 		}
 	}
 
@@ -149,7 +152,8 @@ namespace
 
 		void ReadRegisters(GdbRsp::Registers& regs) override
 		{
-			// Read while paused, as the Qt debugger's register view does.
+			// Read from this thread while paused, as the Qt debugger's register
+			// view reads from the UI thread.
 			for (int i = 0; i < 32; i++)
 				regs.gpr[i] = r5900Debug.getRegister(EECAT_GPR, i)._u64[0];
 			regs.hi = r5900Debug.getRegister(EECAT_GPR, 33)._u64[0];
@@ -294,6 +298,8 @@ namespace
 
 		// Where one step from pc lands, worked out as the Qt debugger's Step
 		// Into does: a branch runs with its delay slot, a syscall is taken.
+		// Needs proper testing: an interrupt or exception taken during the step
+		// runs on until the handler returns to the stepping breakpoint.
 		static u32 NextPC(u32 pc)
 		{
 			const MIPSAnalyst::MipsOpcodeInfo info = MIPSAnalyst::GetOpcodeInfo(&r5900Debug, pc);
