@@ -13,6 +13,8 @@
 #include "common/Console.h"
 #include "common/Threading.h"
 
+#include "fmt/format.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -22,15 +24,17 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 namespace
 {
-	// Set by OnMemoryFault (CPU thread), consumed by the next stop report.
-	std::atomic<bool> s_fault_pending{false};
-	std::atomic<u32> s_fault_address{0};
+	// Set by OnMemoryFault, consumed by the next stop report; both on the CPU thread.
+	bool s_fault_pending = false;
+	u32 s_fault_address = 0;
+	std::string s_fault_message;
 
 	// Shutdown joins the server thread FROM the CPU thread, so the server must
 	// never block on the CPU thread outright: every call below is posted, and
@@ -104,6 +108,7 @@ namespace
 			{
 				bool fault = false;
 				u32 fault_address = 0;
+				std::string fault_message;
 				bool triggered = false;
 				std::vector<MemCheck> memchecks;
 			};
@@ -111,8 +116,9 @@ namespace
 			// block it stopped in, so the registers read next are settled.
 			const auto seen = CallOnCPU<Seen>([] {
 				Seen s;
-				s.fault = s_fault_pending.exchange(false);
-				s.fault_address = s_fault_address.load();
+				s.fault = std::exchange(s_fault_pending, false);
+				s.fault_address = s_fault_address;
+				s.fault_message = std::move(s_fault_message);
 				s.triggered = CBreakPoints::GetBreakpointTriggered();
 				if (s.triggered)
 				{
@@ -132,6 +138,7 @@ namespace
 			{
 				stop.reason = GdbRsp::StopReason::Fault;
 				stop.data_address = seen->fault_address;
+				stop.message = seen->fault_message;
 			}
 			else if (seen->triggered)
 			{
@@ -391,13 +398,20 @@ void GdbServer::Shutdown()
 	Stop();
 }
 
-bool GdbServer::OnMemoryFault(u32 pc, u32 address, bool store)
+bool GdbServer::OnMemoryFault(u32 address, bool store, bool exact)
 {
 	if (!s_server || !s_server->HasClient())
 		return false;
-	s_fault_address.store(address);
-	s_fault_pending.store(true);
-	Console.ErrorFmt("GDB server: bad access, pc=0x{:08x} addr=0x{:08x} [{}] - stopped for the debugger", pc, address,
-		store ? "store" : "load");
+	s_fault_pending = true;
+	s_fault_address = address;
+	s_fault_message = fmt::format("PCSX2: {} at unmapped address 0x{:08x}.\n", store ? "store" : "load", address);
+	if (!exact)
+	{
+		// The recompiler only checks for the pause at the end of a block, so the
+		// stop can be a few instructions - even a return or two - later.
+		s_fault_message += "PCSX2: the EE recompiler stops after the faulting instruction; switch the EE to the "
+						   "interpreter for an exact stop.\n";
+	}
+	Console.Error(s_fault_message);
 	return true;
 }

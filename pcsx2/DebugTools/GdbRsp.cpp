@@ -307,6 +307,13 @@ namespace GdbRsp
 			return;
 		m_last_stop = m_target.TakeStop();
 		m_running = false;
+		// Console output is only accepted while gdb waits for the stop reply.
+		if (!m_last_stop.message.empty())
+		{
+			std::string packet = "O";
+			AppendHex(packet, m_last_stop.message.data(), m_last_stop.message.size());
+			SendPacket(packet);
+		}
 		SendPacket(StopReply());
 	}
 

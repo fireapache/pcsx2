@@ -516,11 +516,35 @@ void GoemonUnloadTlb(u32 key)
 	}
 }
 
+// With a GDB client attached, a bad access stops for it (as SIGSEGV) instead of
+// reaching the guest or the log. The interpreter stops on the faulting
+// instruction; the recompiler only at the end of the block.
+static __ri bool vtlb_StopForDebugger(u32 addr, u32 mode)
+{
+	const bool exact = (Cpu == &intCpu);
+	if (!GdbServer::OnMemoryFault(addr, mode != 0, exact))
+		return false;
+
+	if (exact)
+	{
+		// The interpreter moved pc past the instruction before running it.
+		// Needs proper testing: in a branch delay slot this restarts the branch.
+		cpuRegs.pc -= cpuRegs.branch ? 8 : 4;
+		cpuRegs.branch = 0;
+	}
+	VMManager::SetPaused(true);
+	Cpu->ExitExecution();
+	return true;
+}
+
 // Generates a tlbMiss Exception
 static __ri void vtlb_Miss(u32 addr, u32 mode)
 {
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		GoemonTlbMissDebug();
+
+	if (vtlb_StopForDebugger(addr, mode))
+		return;
 
 	// Hack to handle expected tlb miss by some games.
 	if (Cpu == &intCpu)
@@ -536,14 +560,10 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 	}
 
 	const std::string message(fmt::format("TLB Miss, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
-	// An attached GDB client hears this as SIGSEGV: pause for it, without the dialog.
-	// Needs proper testing: under the recompiler cpuRegs.pc can still be the block start.
-	const bool gdb_stop = GdbServer::OnMemoryFault(cpuRegs.pc, addr, mode != 0);
-	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss || gdb_stop)
+	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
 	{
 		// Pause, let the user try to figure out what went wrong in the debugger.
-		if (!gdb_stop)
-			Host::ReportErrorAsync("R5900 Exception", message);
+		Host::ReportErrorAsync("R5900 Exception", message);
 		VMManager::SetPaused(true);
 		Cpu->ExitExecution();
 		return;
@@ -559,14 +579,14 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 // time of the exception.
 static __ri void vtlb_BusError(u32 addr, u32 mode)
 {
+	if (vtlb_StopForDebugger(addr, mode))
+		return;
+
 	const std::string message(fmt::format("Bus Error, addr=0x{:x} [{}]", addr, mode ? "store" : "load"));
-	// An attached gdb hears this as SIGSEGV: pause for it, without the dialog.
-	const bool gdb_stop = GdbServer::OnMemoryFault(cpuRegs.pc, addr, mode != 0);
-	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss || gdb_stop)
+	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
 	{
 		// Pause, let the user try to figure out what went wrong in the debugger.
-		if (!gdb_stop)
-			Host::ReportErrorAsync("R5900 Exception", message);
+		Host::ReportErrorAsync("R5900 Exception", message);
 		VMManager::SetPaused(true);
 		Cpu->ExitExecution();
 		return;

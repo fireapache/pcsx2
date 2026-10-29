@@ -40,6 +40,9 @@ namespace GdbRsp
 		StopReason reason = StopReason::Interrupt;
 		WatchKind watch_kind = WatchKind::Write;
 		u32 data_address = 0; // the watched or faulting access
+		// Shown in the debugger's console before the stop (an O packet), e.g.
+		// what a fault touched. Empty: nothing is shown.
+		std::string message;
 	};
 
 	// The registers gdb sees, in its mips numbering: r0-r31, status, lo, hi,

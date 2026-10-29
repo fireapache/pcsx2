@@ -22,7 +22,9 @@ namespace GdbServer
 	// CPU thread, at shutdown.
 	void Shutdown();
 
-	// From the EE's vtlb miss and bus error handlers (CPU thread). True when a debugger is
-	// attached: the caller then pauses the VM and the debugger sees SIGSEGV.
-	bool OnMemoryFault(u32 pc, u32 address, bool store);
+	// From the EE's vtlb miss and bus error handlers (CPU thread). True when a
+	// debugger is attached: the caller then pauses the VM and the debugger sees
+	// SIGSEGV. `exact` says the caller stops ON the faulting instruction (the
+	// interpreter can; the recompiler cannot).
+	bool OnMemoryFault(u32 address, bool store, bool exact);
 } // namespace GdbServer

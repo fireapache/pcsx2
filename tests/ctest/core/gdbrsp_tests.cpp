@@ -131,6 +131,15 @@ namespace
 		bool alive = true;
 	};
 
+	GdbRsp::Stop MakeStop(GdbRsp::StopReason reason, GdbRsp::WatchKind kind = GdbRsp::WatchKind::Write, u32 address = 0)
+	{
+		GdbRsp::Stop stop;
+		stop.reason = reason;
+		stop.watch_kind = kind;
+		stop.data_address = address;
+		return stop;
+	}
+
 	std::string Hex64(u64 value)
 	{
 		std::string out;
@@ -249,18 +258,31 @@ TEST(GdbRsp, ContinueRepliesWithTheNextStop)
 	h.session.Poll();
 	EXPECT_EQ(h.sent, ""); // still running
 
-	h.target.stop = {GdbRsp::StopReason::Fault, GdbRsp::WatchKind::Write, 0xdead0000};
+	h.target.stop = MakeStop(GdbRsp::StopReason::Fault, GdbRsp::WatchKind::Write, 0xdead0000);
 	h.target.halted = true;
 	h.session.Poll();
 	EXPECT_EQ(h.LastPayload(), "T0b");
 	EXPECT_FALSE(h.session.IsRunning());
 }
 
+TEST(GdbRsp, AStopMessageReachesTheConsoleFirst)
+{
+	Harness h;
+	h.Ask("c");
+	h.target.stop.reason = GdbRsp::StopReason::Fault;
+	h.target.stop.message = "hi\n";
+	h.target.halted = true;
+	h.sent.clear();
+	h.session.Poll();
+	EXPECT_EQ(h.sent.substr(0, h.sent.find('#')), "$O68690a"); // "hi\n" in hex
+	EXPECT_EQ(h.LastPayload(), "T0b");
+}
+
 TEST(GdbRsp, WatchpointStopsNameTheAddress)
 {
 	Harness h;
 	h.Ask("c");
-	h.target.stop = {GdbRsp::StopReason::Watchpoint, GdbRsp::WatchKind::Read, 0x500000};
+	h.target.stop = MakeStop(GdbRsp::StopReason::Watchpoint, GdbRsp::WatchKind::Read, 0x500000);
 	h.target.halted = true;
 	h.session.Poll();
 	EXPECT_EQ(h.LastPayload(), "T05rwatch:500000;");
@@ -279,7 +301,7 @@ TEST(GdbRsp, StepGoesToTheTarget)
 	Harness h;
 	h.Ask("s");
 	EXPECT_EQ(h.target.steps, 1);
-	h.target.stop = {GdbRsp::StopReason::Breakpoint};
+	h.target.stop = MakeStop(GdbRsp::StopReason::Breakpoint);
 	h.target.halted = true;
 	h.session.Poll();
 	EXPECT_EQ(h.LastPayload(), "T05");
