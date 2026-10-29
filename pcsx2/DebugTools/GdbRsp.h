@@ -86,6 +86,8 @@ namespace GdbRsp
 		virtual bool WriteMemory(u32 address, const void* src, u32 size) = 0;
 		virtual bool SetBreakpoint(u32 address, bool set) = 0;
 		virtual bool SetWatchpoint(u32 address, u32 size, WatchKind kind, bool set) = 0;
+		// A debugger connected; the machine may still be running.
+		virtual void Attached() {}
 		// The debugger went away: drop every breakpoint and watchpoint it set.
 		virtual void ClearAll() = 0;
 	};

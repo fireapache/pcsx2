@@ -37,6 +37,9 @@ namespace
 	u32 s_fault_address = 0;
 	std::string s_fault_message;
 
+	// The server armed the debugger's pause on entry (GdbServerWait); CPU thread.
+	bool s_entry_wait_armed = false;
+
 	// Shutdown joins the server thread FROM the CPU thread, so the server must
 	// never block on the CPU thread outright: every call below is posted, and
 	// its wait gives up once the server is stopping.
@@ -103,6 +106,18 @@ namespace
 
 		void Step() override { Run(true); }
 
+		void Attached() override
+		{
+			// A debugger that is already here needs no wait: the entry stop would
+			// only reach it as an unexplained SIGTRAP. A pause on entry the user
+			// asked for (Boot and Debug) stays.
+			RunOnCPU([] {
+				if (std::exchange(s_entry_wait_armed, false))
+					DebugInterface::setPauseOnEntry(false);
+				return true;
+			});
+		}
+
 		GdbRsp::Stop TakeStop() override
 		{
 			struct Seen
@@ -111,6 +126,7 @@ namespace
 				u32 fault_address = 0;
 				std::string fault_message;
 				bool triggered = false;
+				u32 pc = 0;
 				std::vector<MemCheck> memchecks;
 			};
 			// On the CPU thread: getting there also means the EE has left the
@@ -121,9 +137,10 @@ namespace
 				s.fault_address = s_fault_address;
 				s.fault_message = std::move(s_fault_message);
 				s.triggered = CBreakPoints::GetBreakpointTriggered();
+				s.pc = r5900Debug.getPC();
+				s.memchecks = CBreakPoints::GetMemChecks(BREAKPOINT_EE);
 				if (s.triggered)
 				{
-					s.memchecks = CBreakPoints::GetMemChecks(BREAKPOINT_EE);
 					// The Qt debugger clears these in its own pause handler; with
 					// only gdb watching nobody would.
 					CBreakPoints::ClearTemporaryBreakPoints();
@@ -132,29 +149,33 @@ namespace
 				return s;
 			});
 
+			const std::optional<u32> step_target = std::exchange(m_step_target, std::nullopt);
 			GdbRsp::Stop stop;
 			if (!seen)
 				return stop;
+
+			// Told apart by this server's own state, not by the shared triggered
+			// flag alone: an open Qt debugger window clears that flag on every
+			// pause, possibly before this runs.
 			if (seen->fault)
 			{
 				stop.reason = GdbRsp::StopReason::Fault;
 				stop.data_address = seen->fault_address;
 				stop.message = seen->fault_message;
+				return stop;
 			}
-			else if (seen->triggered)
+			for (const auto& [range, watch] : m_watches)
 			{
-				stop.reason = GdbRsp::StopReason::Breakpoint;
-				for (const auto& [range, watch] : m_watches)
-				{
-					if (HitsOf(seen->memchecks, range) == watch.hits_at_resume)
-						continue;
-					stop.reason = GdbRsp::StopReason::Watchpoint;
-					stop.watch_kind = watch.kind;
-					stop.data_address = LastAddressOf(seen->memchecks, range);
-					break;
-				}
+				if (HitsOf(seen->memchecks, range) == watch.hits_at_resume)
+					continue;
+				stop.reason = GdbRsp::StopReason::Watchpoint;
+				stop.watch_kind = watch.kind;
+				stop.data_address = LastAddressOf(seen->memchecks, range);
+				return stop;
 			}
-			// Otherwise: paused by gdb's interrupt or by hand -> Interrupt.
+			if (seen->triggered || seen->pc == step_target || m_breakpoints.count(seen->pc) != 0)
+				stop.reason = GdbRsp::StopReason::Breakpoint;
+			// Otherwise: paused by gdb's interrupt or from the UI -> Interrupt.
 			return stop;
 		}
 
@@ -293,15 +314,17 @@ namespace
 				for (auto& [range, watch] : m_watches)
 					watch.hits_at_resume = HitsOf(*hits, range);
 			}
-			RunOnCPU([step] {
+			const auto target = CallOnCPU<u32>([step] {
 				const u32 pc = r5900Debug.getPC();
 				// A breakpoint on the resume pc would stop again at once.
 				CBreakPoints::SetSkipFirst(BREAKPOINT_EE, pc);
+				const u32 next = step ? NextPC(pc) : 0;
 				if (step)
-					CBreakPoints::AddBreakPoint(BREAKPOINT_EE, NextPC(pc), true, true, true);
+					CBreakPoints::AddBreakPoint(BREAKPOINT_EE, next, true, true, true);
 				VMManager::SetPaused(false);
-				return true;
+				return next;
 			});
+			m_step_target = (step && target) ? target : std::nullopt;
 		}
 
 		// Where one step from pc lands, worked out as the Qt debugger's Step
@@ -340,6 +363,7 @@ namespace
 
 		std::set<u32> m_breakpoints;
 		std::map<std::pair<u32, u32>, Watch> m_watches;
+		std::optional<u32> m_step_target; // where the last step planted its breakpoint
 	};
 
 	// Owned by the CPU thread (Reload / Shutdown / OnMemoryFault all run there).
@@ -404,7 +428,10 @@ void GdbServer::Reload()
 	// game's startup has run. Waiting holds the game at its ELF's entry point -
 	// the debugger's Boot and Debug - until a client attaches and continues.
 	if (ConfiguredWait())
+	{
 		DebugInterface::setPauseOnEntry(true);
+		s_entry_wait_armed = true;
+	}
 }
 
 void GdbServer::Shutdown()

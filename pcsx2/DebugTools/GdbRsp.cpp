@@ -735,6 +735,7 @@ namespace GdbRsp
 	{
 		const socket_t s = static_cast<socket_t>(client);
 		m_has_client.store(true, std::memory_order_release);
+		m_target.Attached();
 
 		// gdb's first question is why the machine stopped, so stop it.
 		if (!m_target.IsHalted())
