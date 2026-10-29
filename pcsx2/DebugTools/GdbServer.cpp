@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <memory>
@@ -357,6 +358,13 @@ namespace
 		return static_cast<u16>(std::clamp(port, 0, 65535));
 	}
 
+	bool ConfiguredWait()
+	{
+		if (const char* env = std::getenv("PCSX2_GDB_WAIT"); env && *env)
+			return std::strcmp(env, "0") != 0;
+		return Host::GetBaseBoolSettingValue("EmuCore", "GdbServerWait", false);
+	}
+
 	void Stop()
 	{
 		if (!s_server)
@@ -391,6 +399,12 @@ void GdbServer::Reload()
 		Threading::SetNameOfCurrentThread("GDB Server");
 		server->Run(port);
 	});
+
+	// A debugger needs a few seconds to load symbols and attach, by which time a
+	// game's startup has run. Waiting holds the game at its ELF's entry point -
+	// the debugger's Boot and Debug - until a client attaches and continues.
+	if (ConfiguredWait())
+		DebugInterface::setPauseOnEntry(true);
 }
 
 void GdbServer::Shutdown()

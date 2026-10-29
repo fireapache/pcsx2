@@ -8,8 +8,9 @@
 //
 // Off unless a port is configured: the environment variable PCSX2_GDB_PORT
 // wins, else [EmuCore] GdbServerPort in the ini; 0 or absent = off. It listens
-// on 127.0.0.1 only, and only while a VM is running. The protocol itself is
-// DebugTools/GdbRsp.cpp.
+// on 127.0.0.1 only, and only while a VM is running. PCSX2_GDB_WAIT=1 (or
+// [EmuCore] GdbServerWait) holds the game at its entry point until a debugger
+// attaches. The protocol itself is DebugTools/GdbRsp.cpp.
 
 #include "common/Pcsx2Defs.h"
 
