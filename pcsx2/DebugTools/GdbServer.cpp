@@ -7,7 +7,9 @@
 #include "DebugTools/GdbRsp.h"
 #include "DebugTools/MIPSAnalyst.h"
 #include "Host.h"
+#include "Memory.h"
 #include "R5900.h"
+#include "R5900OpcodeTables.h"
 #include "VMManager.h"
 
 #include "common/Console.h"
@@ -87,6 +89,51 @@ namespace
 		}
 	}
 
+	// The load or store a memory check stopped in front of. Both cores break BEFORE
+	// the access runs, at pc - or one word on, when pc is a branch whose delay slot
+	// holds it - and only the recompiler counts the hits, so the access is worked out
+	// from the instruction and the registers instead. CPU thread.
+	struct MemoryAccess
+	{
+		u32 address;
+		u32 size;
+		bool store;
+	};
+
+	std::optional<MemoryAccess> AccessAt(u32 pc)
+	{
+		const int needed = isMemcheckNeeded(pc); // 0 while no memory check is set
+		if (needed == 0)
+			return std::nullopt;
+		const u32 op = memRead32(needed == 2 ? pc + 4 : pc);
+		const R5900::OPCODE& opcode = R5900::GetInstruction(op);
+		u32 size = 0;
+		switch (opcode.flags & MEMTYPE_MASK)
+		{
+			case MEMTYPE_BYTE:
+				size = 1;
+				break;
+			case MEMTYPE_HALF:
+				size = 2;
+				break;
+			case MEMTYPE_WORD:
+				size = 4;
+				break;
+			case MEMTYPE_DWORD:
+				size = 8;
+				break;
+			case MEMTYPE_QWORD:
+				size = 16;
+				break;
+			default:
+				return std::nullopt;
+		}
+		u32 address = r5900Debug.getRegister(EECAT_GPR, (op >> 21) & 0x1F)._u32[0] + static_cast<u32>(static_cast<s16>(op));
+		if (size == 16)
+			address &= ~0xFu;
+		return MemoryAccess{standardizeBreakpointAddress(address), size, (opcode.flags & IS_STORE) != 0};
+	}
+
 	// The EE behind the protocol. Called from the server thread only; the
 	// bookkeeping (what this client set) lives here, the emulator state is
 	// touched on the CPU thread as the Qt debugger does.
@@ -127,7 +174,7 @@ namespace
 				std::string fault_message;
 				bool triggered = false;
 				u32 pc = 0;
-				std::vector<MemCheck> memchecks;
+				std::optional<MemoryAccess> access; // set when a memory check could have stopped it
 			};
 			// On the CPU thread: getting there also means the EE has left the
 			// block it stopped in, so the registers read next are settled.
@@ -138,9 +185,9 @@ namespace
 				s.fault_message = std::move(s_fault_message);
 				s.triggered = CBreakPoints::GetBreakpointTriggered();
 				s.pc = r5900Debug.getPC();
-				s.memchecks = CBreakPoints::GetMemChecks(BREAKPOINT_EE);
 				if (s.triggered)
 				{
+					s.access = AccessAt(s.pc);
 					// The Qt debugger clears these in its own pause handler; with
 					// only gdb watching nobody would.
 					CBreakPoints::ClearTemporaryBreakPoints();
@@ -164,14 +211,26 @@ namespace
 				stop.message = seen->fault_message;
 				return stop;
 			}
-			for (const auto& [range, watch] : m_watches)
+			// A memory check stops in front of the access (gdb knows: MIPS watchpoints
+			// trigger before the instruction, so it steps over it and then compares the
+			// value). Which of gdb's watches does that access touch?
+			if (seen->access && m_installed.count(seen->pc) == 0)
 			{
-				if (HitsOf(seen->memchecks, range) == watch.hits_at_resume)
-					continue;
-				stop.reason = GdbRsp::StopReason::Watchpoint;
-				stop.watch_kind = watch.kind;
-				stop.data_address = LastAddressOf(seen->memchecks, range);
-				return stop;
+				const MemoryAccess& a = *seen->access;
+				for (const auto& [range, watch] : m_watches)
+				{
+					const bool kind_matches = watch.kind == GdbRsp::WatchKind::Access ||
+											  (watch.kind == GdbRsp::WatchKind::Write) == a.store;
+					const u32 first = standardizeBreakpointAddress(range.first);
+					const u32 last = first + (range.second - range.first); // exclusive
+					if (!kind_matches || a.address >= last || a.address + a.size <= first)
+						continue;
+					stop.reason = GdbRsp::StopReason::Watchpoint;
+					stop.watch_kind = watch.kind;
+					// gdb wants an address inside the range it asked for.
+					stop.data_address = range.first + (std::max(a.address, first) - first);
+					return stop;
+				}
 			}
 			if (seen->triggered || seen->pc == step_target || m_installed.count(seen->pc) != 0)
 				stop.reason = GdbRsp::StopReason::Breakpoint;
@@ -266,7 +325,7 @@ namespace
 			if (ok)
 			{
 				if (set)
-					m_watches[{address, end}] = Watch{kind, 0};
+					m_watches[{address, end}] = Watch{kind};
 				else
 					m_watches.erase({address, end});
 			}
@@ -295,20 +354,10 @@ namespace
 		struct Watch
 		{
 			GdbRsp::WatchKind kind;
-			u32 hits_at_resume;
 		};
 
 		void Run(bool step)
 		{
-			// Remember each watchpoint's hit count, so the next stop can tell
-			// which one fired.
-			const auto hits = CallOnCPU<std::vector<MemCheck>>([] { return CBreakPoints::GetMemChecks(BREAKPOINT_EE); });
-			if (hits)
-			{
-				for (auto& [range, watch] : m_watches)
-					watch.hits_at_resume = HitsOf(*hits, range);
-			}
-
 			// Only what changed since the last resume reaches CBreakPoints. A
 			// step may leave a breakpoint on its own pc in: the skip-first below
 			// passes over it, and gdb puts it back after the step anyway.
@@ -358,26 +407,6 @@ namespace
 			if (info.isBranch)
 				return (!info.isConditional || info.conditionMet) ? info.branchTarget : pc + 8;
 			return pc + 4;
-		}
-
-		static u32 HitsOf(const std::vector<MemCheck>& checks, const std::pair<u32, u32>& range)
-		{
-			for (const MemCheck& mc : checks)
-			{
-				if (mc.start == range.first && mc.end == range.second)
-					return mc.totalHits;
-			}
-			return 0;
-		}
-
-		static u32 LastAddressOf(const std::vector<MemCheck>& checks, const std::pair<u32, u32>& range)
-		{
-			for (const MemCheck& mc : checks)
-			{
-				if (mc.start == range.first && mc.end == range.second)
-					return mc.lastAddr;
-			}
-			return range.first;
 		}
 
 		std::set<u32> m_breakpoints; // what gdb has inserted
@@ -469,9 +498,14 @@ bool GdbServer::OnMemoryFault(u32 address, bool store, bool exact)
 	if (!exact)
 	{
 		// The recompiler only checks for the pause at the end of a block, so the
-		// stop can be a few instructions - even a return or two - later.
-		s_fault_message += "PCSX2: the EE recompiler stops after the faulting instruction; switch the EE to the "
-						   "interpreter for an exact stop.\n";
+		// stop can be a few instructions - even a return or two - later. cpuRegs.pc
+		// is where the faulting block began (the stock "TLB Miss, pc=" line prints
+		// the same), so the access lies between it and where gdb stops.
+		s_fault_message += fmt::format(
+			"PCSX2: the EE recompiler stops at the end of its block, after the faulting instruction: the access is in "
+			"the block that began at 0x{0:08x} (gdb: info symbol 0x{0:08x}, x/12i 0x{0:08x}), before the stop. Switch "
+			"the EE to the interpreter for an exact stop.\n",
+			cpuRegs.pc);
 	}
 	Console.Error(s_fault_message);
 	return true;
